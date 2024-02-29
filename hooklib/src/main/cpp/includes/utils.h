@@ -35,6 +35,7 @@ bool munprotect(size_t addr, size_t len);
 
 bool flushCacheExt(Size addr, Size len);
 
+void getClassLinker(JNIEnv *env);
 }
 
 

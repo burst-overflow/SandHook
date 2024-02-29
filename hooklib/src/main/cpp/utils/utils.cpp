@@ -139,5 +139,22 @@ bool flushCacheExt(Size addr, Size len) {
     return true;
 }
 
+void getClassLinker(JNIEnv *env) {
+    if (env != nullptr) {
+        jclass clazz = env->FindClass("com/swift/sandhook/ClassLinkerHelper");
+        if (clazz == NULL) {
+            printf("find class error !");
+            return;
+        }
+        jmethodID id = env->GetStaticMethodID(clazz, "GetClassLinker", "()V");
+        if (id == NULL) {
+            printf("find field error !");
+            return;
+        }
+
+        env->CallStaticVoidMethod(clazz, id);
+    }
+    return;
+}
 }
 

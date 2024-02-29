@@ -17,7 +17,8 @@ extern "C" {
 
     void* jitCompilerHandle = nullptr;
     bool (*jitCompileMethod)(void*, void*, void*, bool) = nullptr;
-    bool (*jitCompileMethodQ)(void*, void*, void*, bool, bool) = nullptr;
+    bool (*jitCompileMethodQ)(void* jit, void* artMethod, void* self, bool baseline, bool osr) = nullptr;
+    bool (*jitCompileMethodR)(void* jit, void* artMethod, void* self, int compilationKind, bool prejit) = nullptr;
 
     void (*innerSuspendVM)() = nullptr;
     void (*innerResumeVM)() = nullptr;
@@ -43,6 +44,7 @@ extern "C" {
         return ret;
     }
 
+    // TODO: ShouldUseInterpreterEntrypoint 无法帮助函数内联时的 hook，已弃用
     bool (*origin_ShouldUseInterpreterEntrypoint)(ArtMethod *artMethod, const void* quick_code) = nullptr;
     bool replace_ShouldUseInterpreterEntrypoint(ArtMethod *artMethod, const void* quick_code) {
         SHADOWHOOK_STACK_SCOPE();
@@ -52,7 +54,7 @@ extern "C" {
         SHADOWHOOK_ALLOW_REENTRANT();
         bool ret = origin_ShouldUseInterpreterEntrypoint(artMethod, quick_code);
         SHADOWHOOK_DISALLOW_REENTRANT();
-        return origin_ShouldUseInterpreterEntrypoint(artMethod, quick_code);
+        return ret;
     }
 
     // paths
@@ -60,8 +62,6 @@ extern "C" {
     const char* jit_lib_path;
 
     JavaVM* jvm;
-
-    void *(*hook_native)(void* origin, void *replace, void **orig_addr) = nullptr;
 
     void (*class_init_callback)(void*) = nullptr;
 
@@ -75,9 +75,37 @@ extern "C" {
 
     void* runtime_instance_ = nullptr;
 
+    void* class_linker_ = nullptr;
+
+    void* (*origin_CreateProxyClass)(void* thiz,
+                                     void* soa,
+                                     jstring name,
+                                     jobjectArray interfaces,
+                                     jobject loader,
+                                     jobjectArray methods,
+                                     jobjectArray throws);
+    void* replace_CreateProxyClass(void* thiz,
+                                   void* soa,
+                                   jstring name,
+                                   jobjectArray interfaces,
+                                   jobject loader,
+                                   jobjectArray methods,
+                                   jobjectArray throws) {
+        SHADOWHOOK_STACK_SCOPE();
+        SHADOWHOOK_ALLOW_REENTRANT();
+        void* ret = nullptr;
+        if (origin_CreateProxyClass != nullptr) {
+            class_linker_ = thiz;
+            ret = origin_CreateProxyClass(thiz, soa, name, interfaces, loader, methods, throws);
+        }
+        SHADOWHOOK_DISALLOW_REENTRANT();
+        return ret;
+    }
+
     void initHideApi(JNIEnv* env) {
 
         env->GetJavaVM(&jvm);
+        shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 
         if (BYTE_POINT == 8) {
             if (SDK_INT >= ANDROID_Q) {
@@ -99,10 +127,16 @@ extern "C" {
 
         //init compile
         if (SDK_INT >= ANDROID_N) {
-            globalJitCompileHandlerAddr = reinterpret_cast<art::jit::JitCompiler **>(getSymCompat(art_lib_path, "_ZN3art3jit3Jit20jit_compiler_handle_E"));
-            if (SDK_INT >= ANDROID_Q) {
-                jitCompileMethodQ = reinterpret_cast<bool (*)(void *, void *, void *, bool,
-                                                         bool)>(getSymCompat(jit_lib_path, "jit_compile_method"));
+            globalJitCompileHandlerAddr = reinterpret_cast<art::jit::JitCompiler **>(
+                    getSymCompat(art_lib_path,
+                                 "_ZN3art3jit3Jit20jit_compiler_handle_E"));
+            if (SDK_INT >= ANDROID_R) {
+                jitCompileMethodR = reinterpret_cast<bool (*)(void*, void*, void*, int, bool)>(
+                        getSymCompat(art_lib_path,
+                                     "_ZN3art3jit3Jit13CompileMethodEPNS_9ArtMethodEPNS_6ThreadENS_15CompilationKindEb"));
+            } else if (SDK_INT == ANDROID_Q) {
+                    jitCompileMethodQ = reinterpret_cast<bool (*)(void *, void *, void *, bool,
+                            bool)>(getSymCompat(jit_lib_path, "jit_compile_method"));
             } else {
                 jitCompileMethod = reinterpret_cast<bool (*)(void *, void *, void *,
                                                              bool)>(getSymCompat(jit_lib_path,
@@ -162,28 +196,21 @@ extern "C" {
             profileSaver_ForceProcessProfiles = reinterpret_cast<void (*)()>(getSymCompat(art_lib_path, "_ZN3art12ProfileSaver20ForceProcessProfilesEv"));
         }
 
-        //init native hook lib
-        void* native_hook_handle = dlopen("libshadowhook.so", RTLD_LAZY | RTLD_GLOBAL);
-        if (native_hook_handle) {
-            hook_native = reinterpret_cast<void *(*)(void *, void *, void**)>(dlsym(native_hook_handle, "shadowhook_hook_func_addr"));
-        } else {
-            hook_native = reinterpret_cast<void *(*)(void *, void *, void**)>(getSymCompat(
-                    "libshadowhook.so", "shadowhook_hook_func_addr"));
-        }
-
-        if (SDK_INT >= ANDROID_R && hook_native) {
+        if (SDK_INT >= ANDROID_R) {
             const char *symbol_decode_method = sizeof(void*) == 8 ? "_ZN3art3jni12JniIdManager15DecodeGenericIdINS_9ArtMethodEEEPT_m" : "_ZN3art3jni12JniIdManager15DecodeGenericIdINS_9ArtMethodEEEPT_j";
             void *decodeArtMethod = getSymCompat(art_lib_path, symbol_decode_method);
-            if (art_lib_path != nullptr) {
-                hook_native(decodeArtMethod, reinterpret_cast<void *>(replace_DecodeArtMethodId), (void**) &origin_DecodeArtMethodId);
+            if (decodeArtMethod != nullptr) {
+                shadowhook_hook_func_addr(decodeArtMethod, reinterpret_cast<void *>(replace_DecodeArtMethodId), (void**) &origin_DecodeArtMethodId);
             }
-            void *shouldUseInterpreterEntrypoint = getSymCompat(art_lib_path,
-                                                                "_ZN3art11ClassLinker30ShouldUseInterpreterEntrypointEPNS_9ArtMethodEPKv");
+            void *shouldUseInterpreterEntrypoint = getSymCompat(art_lib_path, "_ZN3art11ClassLinker30ShouldUseInterpreterEntrypointEPNS_9ArtMethodEPKv");
             if (shouldUseInterpreterEntrypoint != nullptr) {
-                hook_native(shouldUseInterpreterEntrypoint, reinterpret_cast<void *>(replace_ShouldUseInterpreterEntrypoint), (void**) &origin_ShouldUseInterpreterEntrypoint);
+                shadowhook_hook_func_addr(shouldUseInterpreterEntrypoint, reinterpret_cast<void *>(replace_ShouldUseInterpreterEntrypoint), (void**) &origin_ShouldUseInterpreterEntrypoint);
+            }
+            void* createProxyClass = getSymCompat(art_lib_path, "_ZN3art11ClassLinker16CreateProxyClassERNS_33ScopedObjectAccessAlreadyRunnableEP8_jstringP13_jobjectArrayP8_jobjectS6_S6_");
+            if (createProxyClass != nullptr) {
+                shadowhook_hook_func_addr(createProxyClass, reinterpret_cast<void *>(replace_CreateProxyClass), (void**) &origin_CreateProxyClass);
             }
         }
-
         runtime_instance_ = *reinterpret_cast<void**>(getSymCompat(art_lib_path, "_ZN3art7Runtime9instance_E"));
     }
 
@@ -208,7 +235,15 @@ extern "C" {
         //backup thread flag and state because of jit compile function will modify thread state
         uint32_t old_flag_and_state = *((uint32_t *) thread);
         bool ret;
-        if (SDK_INT >= ANDROID_Q) {
+        if (SDK_INT >= ANDROID_R) {
+            if (jitCompileMethodR == nullptr) {
+                return false;
+            }
+            // 高版本 jit 编译待定，因为偏移不固定
+//            void* jit = *reinterpret_cast<void**>(reinterpret_cast<size_t>(runtime_instance_) + 0x210);
+//            ret = jitCompileMethodR(jit, artMethod, thread, 1, false);
+        } else
+            if (SDK_INT == ANDROID_Q) {
             if (jitCompileMethodQ == nullptr) {
                 return false;
             }
@@ -352,50 +387,35 @@ extern "C" {
         SHADOWHOOK_DISALLOW_REENTRANT();
     }
 
-    void MakeInitializedClassVisibilyInitialized(void* self){
-        if(make_initialized_classes_visibly_initialized_) {
-            size_t OFFSET_classlinker;
-    #ifdef __LP64__
-            if (SDK_INT >= ANDROID_TIRAMISU) {
-                OFFSET_classlinker = 600;  // AOSP 13 14
-    //                OFFSET_classlinker = 592; // oneplus
-            } else if (SDK_INT >= ANDROID_S) {
-                OFFSET_classlinker = 496;
-            } else {
-                OFFSET_classlinker = 472;
-            }
-    #else
-            if (SDK_INT >= ANDROID_TIRAMISU) {
-                    OFFSET_classlinker = 340;  // AOSP 13 14
-    //                OFFSET_classlinker = 336; // oneplus
-                } else if (SDK_INT >= ANDROID_S) {
-                    OFFSET_classlinker = 288;
-                } else {
-                    OFFSET_classlinker = 276;
-                }
-    #endif
-            __android_log_print(ANDROID_LOG_DEBUG, "miyo", "SDK_INT:%d OFFSET_classlinker:%d make_initialized_classes_visibly_initialized_:%p", SDK_INT, OFFSET_classlinker, make_initialized_classes_visibly_initialized_);
-            void *thiz = *reinterpret_cast<void **>(
-                    reinterpret_cast<size_t>(runtime_instance_) + OFFSET_classlinker);
-            make_initialized_classes_visibly_initialized_(thiz, self, true);
+void MakeInitializedClassesVisiblyInitialized(void* self){
+    if (make_initialized_classes_visibly_initialized_) {
+        if (class_linker_ == nullptr) {
+            getClassLinker(attachAndGetEvn());
+        }
+
+        if (class_linker_ != nullptr) {
+            make_initialized_classes_visibly_initialized_(class_linker_, self, true);
+        } else {
+            LOGW("class_linker_ is null");
         }
     }
+}
 
     bool hookClassInit(void(*callback)(void*)) {
         if (SDK_INT >= ANDROID_R) {
             void *symMarkClassInitialized = getSymCompat(art_lib_path,
                                                            "_ZN3art11ClassLinker20MarkClassInitializedEPNS_6ThreadENS_6HandleINS_6mirror5ClassEEE");
-            if (symMarkClassInitialized == nullptr || hook_native == nullptr)
+            if (symMarkClassInitialized == nullptr || shadowhook_hook_func_addr == nullptr)
                 return false;
 
             void *symUpdateMethodsCode = getSymCompat(art_lib_path,
                                                          "_ZN3art15instrumentation15Instrumentation21UpdateMethodsCodeImplEPNS_9ArtMethodEPKv");
-            if (symUpdateMethodsCode == nullptr || hook_native == nullptr)
+            if (symUpdateMethodsCode == nullptr || shadowhook_hook_func_addr == nullptr)
                 return false;
 
-            hook_native(symMarkClassInitialized, reinterpret_cast<void *>(replaceMarkClassInitialized), (void**) &backup_mark_class_initialized);
+            shadowhook_hook_func_addr(symMarkClassInitialized, reinterpret_cast<void *>(replaceMarkClassInitialized), (void**) &backup_mark_class_initialized);
 
-            hook_native(symUpdateMethodsCode, reinterpret_cast<void *>(replaceUpdateMethodsCode), (void**) &backup_update_methods_code);
+            shadowhook_hook_func_addr(symUpdateMethodsCode, reinterpret_cast<void *>(replaceUpdateMethodsCode), (void**) &backup_update_methods_code);
 
             make_initialized_classes_visibly_initialized_ = reinterpret_cast<void* (*)(void*, void*, bool)>(
                     getSymCompat(art_lib_path, "_ZN3art11ClassLinker40MakeInitializedClassesVisiblyInitializedEPNS_6ThreadEb"));
@@ -415,10 +435,10 @@ extern "C" {
                 symFixupStaticTrampolines = getSymCompat(art_lib_path,
                                                          "_ZN3art11ClassLinker22FixupStaticTrampolinesEPNS_6mirror5ClassE");
             }
-            if (symFixupStaticTrampolines == nullptr || hook_native == nullptr)
+            if (symFixupStaticTrampolines == nullptr || shadowhook_hook_func_addr == nullptr)
                 return false;
 
-            hook_native(symFixupStaticTrampolines, reinterpret_cast<void *>(replaceFixupStaticTrampolines), (void**) &backup_fixup_static_trampolines);
+            shadowhook_hook_func_addr(symFixupStaticTrampolines, reinterpret_cast<void *>(replaceFixupStaticTrampolines), (void**) &backup_fixup_static_trampolines);
 
             if (backup_fixup_static_trampolines) {
                 class_init_callback = callback;
@@ -463,4 +483,3 @@ extern "C" {
     }
 
 }
-

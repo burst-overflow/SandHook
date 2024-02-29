@@ -97,6 +97,8 @@ bool doHookWithReplacement(JNIEnv* env,
     SandHook::HookTrampoline* hookTrampoline = trampolineManager.installReplacementTrampoline(originMethod, hookMethod, backupMethod);
     if (hookTrampoline != nullptr) {
         originMethod->setQuickCodeEntry(hookTrampoline->replacement->getCode());
+        // TODO: 通过设置 Native Flag 执行 android12 的 hook 方案
+        originMethod->setNative();
         void* entryPointFormInterpreter = hookMethod->getInterpreterCodeEntry();
         if (entryPointFormInterpreter != NULL) {
             originMethod->setInterpreterCodeEntry(entryPointFormInterpreter);
@@ -412,9 +414,9 @@ JNIEXPORT bool nativeHookNoBackup(void* origin, void* hook) {
 }
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_swift_sandhook_SandHook_MakeInitializedClassVisibilyInitialized(JNIEnv *env, jclass clazz,
-                                                                         jlong self) {
-    MakeInitializedClassVisibilyInitialized(reinterpret_cast<void*>(self));
+Java_com_swift_sandhook_SandHook_MakeInitializedClassesVisiblyInitialized(JNIEnv *env, jclass clazz,
+                                                                          jlong self) {
+    MakeInitializedClassesVisiblyInitialized(reinterpret_cast<void *>(self));
 }
 extern "C"
 JNIEXPORT void* findSym(const char *elf, const char *sym_name) {
@@ -504,9 +506,9 @@ static JNINativeMethod jniSandHook[] = {
                 (void *) Java_com_swift_sandhook_SandHook_initForPendingHook
         },
         {
-            "MakeInitializedClassVisibilyInitialized",
+            "MakeInitializedClassesVisiblyInitialized",
                 "(J)V",
-                (void*) Java_com_swift_sandhook_SandHook_MakeInitializedClassVisibilyInitialized
+                (void*) Java_com_swift_sandhook_SandHook_MakeInitializedClassesVisiblyInitialized
         }
 };
 
