@@ -12,14 +12,20 @@ ext {
     bintrayName = 'swift-sandhook-annotation'
 }
 
-apply plugin: 'com.novoda.bintray-release'
+//apply plugin: 'com.novoda.bintray-release'
 
-publish {
-    userOrg = rootProject.userOrg
-    groupId = rootProject.groupId
+//publish {
+//    userOrg = rootProject.userOrg
+//    groupId = rootProject.groupId
+//    artifactId = 'hookannotation'
+//    publishVersion = rootProject.publishVersion
+//    desc = rootProject.desc
+//    website = rootProject.website
+//    licences = rootProject.licences
+//}
+
+ext {
     artifactId = 'hookannotation'
-    publishVersion = rootProject.publishVersion
-    desc = rootProject.desc
-    website = rootProject.website
-    licences = rootProject.licences
 }
+
+apply from: '../publish.gradle'

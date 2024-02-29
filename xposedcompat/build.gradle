@@ -26,19 +26,20 @@ android {
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
-    implementation 'com.jakewharton.android.repackaged:dalvik-dx:9.0.0_r3'
+    api 'com.jakewharton.android.repackaged:dalvik-dx:9.0.0_r3'
     compileOnly project(':hooklib')
 }
 
-apply plugin: 'com.novoda.bintray-release'
+//apply plugin: 'com.novoda.bintray-release'
 
-publish {
-    userOrg = rootProject.userOrg
-    groupId = rootProject.groupId
-    artifactId = 'xposedcompat'
-    publishVersion = rootProject.publishVersion
-    desc = rootProject.desc
-    website = rootProject.website
-    licences = rootProject.licences
-}
+//publish {
+//    userOrg = rootProject.userOrg
+//    groupId = rootProject.groupId
+//    artifactId = 'xposedcompat'
+//    publishVersion = rootProject.publishVersion
+//    desc = rootProject.desc
+//    website = rootProject.website
+//    licences = rootProject.licences
+//}
 
+apply from: '../publish.gradle'

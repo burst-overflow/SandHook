@@ -8,3 +8,7 @@
 /build
 /captures
 .externalNativeBuild
+.idea/
+.wakatime-project
+hooklib/.cxx/
+nativehook/.cxx/

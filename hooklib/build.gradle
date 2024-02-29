@@ -24,7 +24,12 @@ android {
             path "src/main/cpp/CMakeLists.txt"
         }
     }
-
+    buildFeatures {
+        prefab true
+    }
+    packagingOptions {
+        exclude '**/libshadowhook.so'
+    }
     buildTypes {
         release {
             minifyEnabled false
@@ -37,16 +42,7 @@ android {
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     api project(':annotation')
+    api 'com.bytedance.android:shadowhook:1.0.8'
 }
 
-apply plugin: 'com.novoda.bintray-release'
-
-publish {
-    userOrg = rootProject.userOrg
-    groupId = rootProject.groupId
-    artifactId = 'hooklib'
-    publishVersion = rootProject.publishVersion
-    desc = rootProject.desc
-    website = rootProject.website
-    licences = rootProject.licences
-}
+apply from: '../publish.gradle'

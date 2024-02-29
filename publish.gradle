@@ -1,0 +1,174 @@
+apply plugin: 'maven-publish'
+apply plugin: 'signing'
+
+Properties localProperties = new Properties()
+localProperties.load(project.rootProject.file('local.properties').newDataInputStream())
+localProperties.each { name, value -> project.ext[name] = value }
+
+def isAndroidProject = project.hasProperty('android')
+
+Map<String, String> projectProperties = new HashMap<>()
+projectProperties.putAll(rootProject.ext.getProperties())
+projectProperties.putAll(project.ext.getProperties())
+def mavenUsername = localProperties.getProperty("sonatype.username")
+def mavenPassword = localProperties.getProperty("sonatype.password")
+def projectGroupId = projectProperties.get('groupId')
+def projectArtifactId = projectProperties.getOrDefault('artifactId', project.getName())
+def projectVersionName = projectProperties.containsKey('versionName') ? projectProperties.get('versionName') : project.extensions.findByName("android")["defaultConfig"].versionName
+def projectDescription = projectProperties.get('description')
+def projectGitUrl = projectProperties.get('gitUrl')
+def projectLicense = projectProperties.get('license')
+def projectLicenseUrl = projectLicense ? "https://opensource.org/licenses/${projectLicense.toString().replace(" ", "-")} " : null
+
+def developerAuthorId = mavenUsername
+def developerAuthorName = mavenUsername
+def developerAuthorEmail = projectProperties.get('authorEmail')
+def publishDependencies = properties.containsKey("publishDependencies") ? properties['publishDependencies'].get(project.getName()) : null
+
+println("${mavenUsername} ${mavenPassword} - ${projectGroupId}:${projectArtifactId}:${projectVersionName}")
+println("${projectLicense} - ${projectLicenseUrl}")
+
+if (!projectGroupId || !projectArtifactId || !projectVersionName) {
+    println("${project.name} missing project information")
+    return
+}
+if (!mavenUsername || !mavenPassword || !localProperties.containsKey("signing.keyId") || !localProperties.containsKey("signing.password") || !localProperties.containsKey("signing.secretKeyRingFile")) {
+    println("${project.name} missing authentication information")
+    return
+}
+if (!projectDescription || !projectGitUrl || !projectLicense || !projectLicenseUrl || !developerAuthorId || !developerAuthorName || !developerAuthorEmail) {
+    println("${project.name} missing project description information")
+}
+
+if (isAndroidProject) {
+    task androidJavadocs(type: Javadoc) {
+        source = android.sourceSets.main.java.srcDirs
+        classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
+    }
+    task javadocsJar(type: Jar, dependsOn: androidJavadocs) {
+        archiveClassifier.set("javadoc")
+        from androidJavadocs.destinationDir
+    }
+    task sourcesJar(type: Jar) {
+        archiveClassifier.set("sources")
+        from android.sourceSets.main.java.srcDirs
+    }
+} else {
+    task javadocsJar(type: Jar, dependsOn: javadoc) {
+        archiveClassifier.set("javadoc")
+        from javadoc.destinationDir
+    }
+    task sourcesJar(type: Jar) {
+        archiveClassifier.set("sources")
+        from sourceSets.main.allJava
+    }
+}
+
+tasks.withType(Javadoc).all {
+    options {
+        encoding "UTF-8"
+        charSet 'UTF-8'
+        author true
+        version true
+        links "http://docs.oracle.com/javase/8/docs/api"
+        if (isAndroidProject) {
+            linksOffline "http://d.android.com/reference", "${android.sdkDirectory}/docs/reference"
+        }
+        failOnError = false
+    }
+    enabled = false
+}
+
+publishing {
+    publications {
+        aar(MavenPublication) {
+            groupId = projectGroupId
+            artifactId = projectArtifactId
+            version = projectVersionName
+
+            if (isAndroidProject) {
+                artifact(new File(buildDir, "outputs/aar/${project.getName()}-release.aar"))
+            } else {
+                artifact(new File(buildDir, "libs/${project.getName()}.jar").getAbsolutePath())
+            }
+            artifact javadocsJar
+            artifact sourcesJar
+
+            pom {
+                name = projectArtifactId
+                description = projectDescription
+                // If your project has a dedicated site, use its URL here
+                url = projectGitUrl
+                if (projectLicense) {
+                    licenses {
+                        license {
+                            name = projectLicense
+                            url = projectLicenseUrl
+                        }
+                    }
+                }
+                developers {
+                    developer {
+                        id = developerAuthorId
+                        name = developerAuthorName
+                        email = developerAuthorEmail
+                    }
+                }
+                // Version control info, if you're using GitHub, follow the format as seen here
+                scm {
+                    connection = "scm:git:${projectGitUrl}"
+                    developerConnection = "scm:git:${projectGitUrl}"
+                    url = projectGitUrl
+                }
+                withXml { xmlProvider ->
+                    def artifactDependencies = []
+                    def dependenciesNode = xmlProvider.asNode().appendNode('dependencies')
+                    configurations.api.allDependencies.each { dependency ->
+                        if (!dependency.hasProperty('dependencyProject')) {
+                            def dependencyNode = dependenciesNode.appendNode('dependency')
+                            dependencyNode.appendNode('groupId', dependency.group)
+                            dependencyNode.appendNode('artifactId', dependency.name)
+                            dependencyNode.appendNode('version', dependency.version)
+                            artifactDependencies.add(dependency.name)
+                        }
+                    }
+                    if (publishDependencies) {
+                        publishDependencies.each { dependency ->
+                            def dependencyNode = dependenciesNode.appendNode('dependency')
+                            def split = dependency.split(':')
+                            def dependencyName = split[1]
+                            if (!artifactDependencies.contains(dependencyName)) {
+                                dependencyNode.appendNode('groupId', split[0])
+                                dependencyNode.appendNode('artifactId', dependencyName)
+                                dependencyNode.appendNode('version', split[2])
+                                artifactDependencies.add(dependencyName)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = projectArtifactId
+
+            def releasesRepoUrl = "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
+            def snapshotsRepoUrl = "https://s01.oss.sonatype.org/content/repositories/snapshots/"
+            // You only need this if you want to publish snapshots, otherwise just set the URL
+            // to the release repo directly
+            url = version.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
+
+            // The username and password we've fetched earlier
+            credentials {
+                username mavenUsername
+                password mavenPassword
+            }
+        }
+    }
+}
+
+signing {
+    sign publishing.publications
+}

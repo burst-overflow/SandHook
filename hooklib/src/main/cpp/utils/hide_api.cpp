@@ -8,6 +8,7 @@
 #include "../includes/utils.h"
 #include "../includes/trampoline_manager.h"
 #include "../includes/art_runtime.h"
+#include "shadowhook.h"
 
 extern int SDK_INT;
 
@@ -34,15 +35,23 @@ extern "C" {
     void *jniIdManager = nullptr;
     ArtMethod *(*origin_DecodeArtMethodId)(void *thiz, jmethodID jmethodId) = nullptr;
     ArtMethod *replace_DecodeArtMethodId(void *thiz, jmethodID jmethodId) {
+        SHADOWHOOK_STACK_SCOPE();
         jniIdManager = thiz;
-        return origin_DecodeArtMethodId(thiz, jmethodId);
+        SHADOWHOOK_ALLOW_REENTRANT();
+        ArtMethod * ret = origin_DecodeArtMethodId(thiz, jmethodId);
+        SHADOWHOOK_DISALLOW_REENTRANT();
+        return ret;
     }
 
     bool (*origin_ShouldUseInterpreterEntrypoint)(ArtMethod *artMethod, const void* quick_code) = nullptr;
     bool replace_ShouldUseInterpreterEntrypoint(ArtMethod *artMethod, const void* quick_code) {
+        SHADOWHOOK_STACK_SCOPE();
         if (SandHook::TrampolineManager::get().methodHooked(artMethod) && quick_code != nullptr) {
             return false;
         }
+        SHADOWHOOK_ALLOW_REENTRANT();
+        bool ret = origin_ShouldUseInterpreterEntrypoint(artMethod, quick_code);
+        SHADOWHOOK_DISALLOW_REENTRANT();
         return origin_ShouldUseInterpreterEntrypoint(artMethod, quick_code);
     }
 
@@ -52,7 +61,7 @@ extern "C" {
 
     JavaVM* jvm;
 
-    void *(*hook_native)(void* origin, void *replace) = nullptr;
+    void *(*hook_native)(void* origin, void *replace, void **orig_addr) = nullptr;
 
     void (*class_init_callback)(void*) = nullptr;
 
@@ -154,30 +163,24 @@ extern "C" {
         }
 
         //init native hook lib
-        void* native_hook_handle = dlopen("libsandhook-native.so", RTLD_LAZY | RTLD_GLOBAL);
+        void* native_hook_handle = dlopen("libshadowhook.so", RTLD_LAZY | RTLD_GLOBAL);
         if (native_hook_handle) {
-            hook_native = reinterpret_cast<void *(*)(void *, void *)>(dlsym(native_hook_handle, "SandInlineHook"));
+            hook_native = reinterpret_cast<void *(*)(void *, void *, void**)>(dlsym(native_hook_handle, "shadowhook_hook_func_addr"));
         } else {
-            hook_native = reinterpret_cast<void *(*)(void *, void *)>(getSymCompat(
-                    "libsandhook-native.so", "SandInlineHook"));
+            hook_native = reinterpret_cast<void *(*)(void *, void *, void**)>(getSymCompat(
+                    "libshadowhook.so", "shadowhook_hook_func_addr"));
         }
 
         if (SDK_INT >= ANDROID_R && hook_native) {
             const char *symbol_decode_method = sizeof(void*) == 8 ? "_ZN3art3jni12JniIdManager15DecodeGenericIdINS_9ArtMethodEEEPT_m" : "_ZN3art3jni12JniIdManager15DecodeGenericIdINS_9ArtMethodEEEPT_j";
             void *decodeArtMethod = getSymCompat(art_lib_path, symbol_decode_method);
             if (art_lib_path != nullptr) {
-                origin_DecodeArtMethodId = reinterpret_cast<ArtMethod *(*)(void *,
-                                                                           jmethodID)>(hook_native(
-                        decodeArtMethod,
-                        reinterpret_cast<void *>(replace_DecodeArtMethodId)));
+                hook_native(decodeArtMethod, reinterpret_cast<void *>(replace_DecodeArtMethodId), (void**) &origin_DecodeArtMethodId);
             }
             void *shouldUseInterpreterEntrypoint = getSymCompat(art_lib_path,
                                                                 "_ZN3art11ClassLinker30ShouldUseInterpreterEntrypointEPNS_9ArtMethodEPKv");
             if (shouldUseInterpreterEntrypoint != nullptr) {
-                origin_ShouldUseInterpreterEntrypoint = reinterpret_cast<bool (*)(ArtMethod *,
-                                                                                  const void *)>(hook_native(
-                        shouldUseInterpreterEntrypoint,
-                        reinterpret_cast<void *>(replace_ShouldUseInterpreterEntrypoint)));
+                hook_native(shouldUseInterpreterEntrypoint, reinterpret_cast<void *>(replace_ShouldUseInterpreterEntrypoint), (void**) &origin_ShouldUseInterpreterEntrypoint);
             }
         }
 
@@ -319,14 +322,20 @@ extern "C" {
     }
 
     void replaceFixupStaticTrampolines(void *thiz, void *clazz_ptr) {
+        SHADOWHOOK_STACK_SCOPE();
+        SHADOWHOOK_ALLOW_REENTRANT();
         backup_fixup_static_trampolines(thiz, clazz_ptr);
+        SHADOWHOOK_DISALLOW_REENTRANT();
         if (class_init_callback) {
             class_init_callback(clazz_ptr);
         }
     }
 
     void *replaceMarkClassInitialized(void * thiz, void * self, uint32_t * clazz_ptr) {
+        SHADOWHOOK_STACK_SCOPE();
+        SHADOWHOOK_ALLOW_REENTRANT();
         auto result = backup_mark_class_initialized(thiz, self, clazz_ptr);
+        SHADOWHOOK_DISALLOW_REENTRANT();
         if (class_init_callback) {
             class_init_callback(reinterpret_cast<void*>(*clazz_ptr));
         }
@@ -334,19 +343,38 @@ extern "C" {
     }
 
     void replaceUpdateMethodsCode(void *thiz, ArtMethod * artMethod, const void *quick_code) {
+        SHADOWHOOK_STACK_SCOPE();
         if (SandHook::TrampolineManager::get().methodHooked(artMethod)) {
             return; //skip
         }
+        SHADOWHOOK_ALLOW_REENTRANT();
         backup_update_methods_code(thiz, artMethod, quick_code);
+        SHADOWHOOK_DISALLOW_REENTRANT();
     }
 
     void MakeInitializedClassVisibilyInitialized(void* self){
         if(make_initialized_classes_visibly_initialized_) {
-#ifdef __LP64__
-            constexpr size_t OFFSET_classlinker = 472;
-#else
-            constexpr size_t OFFSET_classlinker = 276;
-#endif
+            size_t OFFSET_classlinker;
+    #ifdef __LP64__
+            if (SDK_INT >= ANDROID_TIRAMISU) {
+                OFFSET_classlinker = 600;  // AOSP 13 14
+    //                OFFSET_classlinker = 592; // oneplus
+            } else if (SDK_INT >= ANDROID_S) {
+                OFFSET_classlinker = 496;
+            } else {
+                OFFSET_classlinker = 472;
+            }
+    #else
+            if (SDK_INT >= ANDROID_TIRAMISU) {
+                    OFFSET_classlinker = 340;  // AOSP 13 14
+    //                OFFSET_classlinker = 336; // oneplus
+                } else if (SDK_INT >= ANDROID_S) {
+                    OFFSET_classlinker = 288;
+                } else {
+                    OFFSET_classlinker = 276;
+                }
+    #endif
+            __android_log_print(ANDROID_LOG_DEBUG, "miyo", "SDK_INT:%d OFFSET_classlinker:%d make_initialized_classes_visibly_initialized_:%p", SDK_INT, OFFSET_classlinker, make_initialized_classes_visibly_initialized_);
             void *thiz = *reinterpret_cast<void **>(
                     reinterpret_cast<size_t>(runtime_instance_) + OFFSET_classlinker);
             make_initialized_classes_visibly_initialized_(thiz, self, true);
@@ -365,11 +393,9 @@ extern "C" {
             if (symUpdateMethodsCode == nullptr || hook_native == nullptr)
                 return false;
 
-            backup_mark_class_initialized = reinterpret_cast<void *(*)(void *, void *, uint32_t*)>(hook_native(
-                    symMarkClassInitialized, (void *) replaceMarkClassInitialized));
+            hook_native(symMarkClassInitialized, reinterpret_cast<void *>(replaceMarkClassInitialized), (void**) &backup_mark_class_initialized);
 
-            backup_update_methods_code = reinterpret_cast<void (*)(void *, ArtMethod *, const void*)>(hook_native(
-                    symUpdateMethodsCode, (void *) replaceUpdateMethodsCode));
+            hook_native(symUpdateMethodsCode, reinterpret_cast<void *>(replaceUpdateMethodsCode), (void**) &backup_update_methods_code);
 
             make_initialized_classes_visibly_initialized_ = reinterpret_cast<void* (*)(void*, void*, bool)>(
                     getSymCompat(art_lib_path, "_ZN3art11ClassLinker40MakeInitializedClassesVisiblyInitializedEPNS_6ThreadEb"));
@@ -391,9 +417,9 @@ extern "C" {
             }
             if (symFixupStaticTrampolines == nullptr || hook_native == nullptr)
                 return false;
-            backup_fixup_static_trampolines = reinterpret_cast<void (*)(void *,
-                                                                        void *)>(hook_native(
-                    symFixupStaticTrampolines, (void *) replaceFixupStaticTrampolines));
+
+            hook_native(symFixupStaticTrampolines, reinterpret_cast<void *>(replaceFixupStaticTrampolines), (void**) &backup_fixup_static_trampolines);
+
             if (backup_fixup_static_trampolines) {
                 class_init_callback = callback;
                 return true;
